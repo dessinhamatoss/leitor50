@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Leitor de Documentos Acessível</title>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <style>
+        body { margin: 0; background: #000; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+        #video { width: 100%; height: 50%; object-fit: cover; border-bottom: 6px solid #ffcc00; }
+        .controls { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 20px; }
+        .btn-principal { width: 100%; height: 120px; background: #ffcc00; color: #000; border: none; border-radius: 25px; font-size: 2.2rem; font-weight: bold; }
+        #status { font-size: 1.4rem; text-align: center; color: #ffcc00; min-height: 3em; font-weight: bold; padding: 10px; }
+    </style>
+</head>
+<body>
+
+    <video id="video" autoplay playsinline></video>
+    <div class="controls">
+        <div id="status">Iniciando leitor...</div>
+        <button class="btn-principal" onclick="processarLeitura()">LER AGORA</button>
+    </div>
+    <canvas id="canvas" style="display:none;"></canvas>
+
+    <script>
+        const video = document.getElementById('video');
+        const statusTxt = document.getElementById('status');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let guiaAtivo = true;
+        let ultimaFala = "";
+
+        function falar(texto, forcar = false) {
+            if (!forcar && texto === ultimaFala) return;
+            window.speechSynthesis.cancel();
+            const msg = new SpeechSynthesisUtterance(texto);
+            msg.lang = 'pt-BR';
+            window.speechSynthesis.speak(msg);
+            statusTxt.innerText = texto;
+            ultimaFala = texto;
+        }
+
+        async function iniciar() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: "environment", width: { ideal: 1280 } } 
+                });
+                video.srcObject = stream;
+                falar("Leitor pronto. Aponte para o documento.");
+                setTimeout(analisarFrames, 2000);
+            } catch (e) { falar("Erro ao acessar câmera."); }
+        }
+
+        // --- MOTOR DE ENQUADRAMENTO DIRECIONAL ---
+        function analisarFrames() {
+            if (!guiaAtivo) return;
+
+            // Analisa miniatura para rapidez
+            const vW = 160; const vH = 120;
+            const offCanvas = document.createElement('canvas');
+            offCanvas.width = vW; offCanvas.height = vH;
+            const offCtx = offCanvas.getContext('2d');
+            offCtx.drawImage(video, 0, 0, vW, vH);
+            
+            const pixels = offCtx.getImageData(0, 0, vW, vH).data;
+            let pontosTexto = 0; let xM = 0; let yM = 0;
+
+            for (let i = 0; i < pixels.length; i += 4) {
+                const brilho = (pixels[i] + pixels[i+1] + pixels[i+2]) / 3;
+                if (brilho > 160) { // Detecta papel branco/claro
+                    pontosTexto++;
+                    xM += (i / 4) % vW;
+                    yM += Math.floor((i / 4) / vW);
+                }
+            }
+
+            const area = (pontosTexto / (vW * vH)) * 100;
+
+            if (pontosTexto > 100) {
+                xM /= pontosTexto; yM /= pontosTexto;
+                
+                if (area < 15) falar("Aproxime mais o celular.");
+                else if (area > 85) falar("Afaste um pouco o celular.");
+                else if (xM < 60) falar("Mova o celular para a esquerda.");
+                else if (xM > 100) falar("Mova o celular para a direita.");
+                else if (yM < 45) falar("Suba um pouco o celular.");
+                else if (yM > 75) falar("Baixe um pouco o celular.");
+                else falar("Posição excelente. Pode ler.");
+            } else {
+                falar("Documento não encontrado. Tente iluminar mais.");
+            }
+
+            setTimeout(analisarFrames, 2200); // Ciclo de ajuda a cada 2 segundos
+        }
+
+        async function processarLeitura() {
+            guiaAtivo = false; 
+            falar("Processando. Fique parado.", true);
+
+            setTimeout(async () => {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                
+                // Filtro de limpeza para evitar símbolos/códigos
+                ctx.filter = 'contrast(1.4) grayscale(1)';
+                ctx.drawImage(video, 0, 0);
+
+                try {
+                    const worker = await Tesseract.createWorker('por');
+                    await worker.setParameters({
+                        tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÁÀÂÃÉÈÊÍÏÓÔÕÚÛÇáàâãéèêíïóôõúûç.,-/ ',
+                        tessedit_pageseg_mode: '6'
+                    });
+
+                    const { data } = await worker.recognize(canvas);
+                    let textoFinal = data.text.replace(/[^a-zA-Z0-9áàâãéèêíïóôõúûçÁÀÂÃÉÈÊÍÏÓÔÕÚÛÇ.,\-\s]/g, '').trim();
+
+                    if (data.confidence < 45 && textoFinal.length > 10) {
+                        falar("Leitura confusa. Verifique se o papel está invertido ou se há sombras.", true);
+                    } else if (textoFinal.length > 5) {
+                        falar("O documento diz: " + textoFinal, true);
+                    } else {
+                        falar("Não consegui identificar o texto. Tente alinhar novamente.", true);
+                    }
+                    await worker.terminate();
+                } catch (e) { falar("Erro na inteligência artificial.", true); }
+
+                setTimeout(() => { guiaAtivo = true; analisarFrames(); }, 8000);
+            }, 1000);
+        }
+
+        window.onload = iniciar;
+    </script>
+</body>
+</html>
